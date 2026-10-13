@@ -1,0 +1,12 @@
+[package]
+name = "resid-cmw"
+version = "0.1.0"
+root = "src/cmwtool.resid"
+description = "A command-line tool for RATS Conceptual Message Wrappers (CBOR form)"
+license = "MIT"
+repository = "https://github.com/larrydewey/resid-cmw"
+
+# src/cmwtool.resid is pure: no capabilities. The tool (resid-cmw.resid)
+# grants itself what it uses from its own main: args and filesystem.
+[capabilities]
+grant = []

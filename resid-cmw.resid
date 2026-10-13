@@ -1,0 +1,157 @@
+// resid-cmw — inspect, build and edit RATS Conceptual Message Wrappers
+// (draft-ietf-rats-msg-wrap) in their CBOR form. The model and the strict
+// codec are the standard library's lib/cmw.resid; src/cmwtool.resid holds
+// the pure parts. This file only reads arguments and files and writes
+// results. Exit status: 0 success, 1 a refused input, 2 a usage error.
+
+import "cmw.resid";
+import "src/cmwtool.resid";
+
+@requires(filesystem(readonly))
+Result(List(Int), Str) read_file(Str path) {
+    if (path == "-") { return Err("reading stdin is not supported; give a file"); }
+    if (!filesystem.exists(path)) { return Err(path + ": no such file"); }
+    if (filesystem.is_dir(path)) { return Err(path + ": is a directory"); }
+    return Ok(filesystem.read_bytes(path));
+}
+
+@requires(filesystem(readonly))
+Result(Cmw, Str) read_cmw(Str path) {
+    List(Int) bs = read_file(path)?;
+    return match cmw_decode(bs) { Ok(c) => Ok(c), Err(e) => Err(path + ": " + e) };
+}
+
+// Writes `bs` to `out`, or to stdout when `out` is "-".
+@requires(filesystem)
+Int write_out(Str out, List(Int) bs) {
+    if (out == "-") {
+        Bool ok = print_bytes(bs);
+        return if (ok) { 0 } else { 1 };
+    }
+    filesystem.write_bytes(out, bs);
+    return 0;
+}
+
+Int fail(Str why) {
+    eprintln("resid-cmw: " + why);
+    return 1;
+}
+
+Int usage(Str why) {
+    if (why == "") { eprintln(cmwt_usage()); } else { eprintln("resid-cmw: " + why + " (resid-cmw --help for usage)"); }
+    return 2;
+}
+
+// Runs `r`'s error as a failure, or 0.
+Int done(Result(Int, Str) r) { return match r { Ok(n) => n, Err(e) => fail(e) }; }
+
+@requires(filesystem(readonly))
+Result(Int, Str) cmd_inspect(Opts o) {
+    Cmw c = read_cmw(o.pos[0])?;
+    print(cmwt_tree(c, o.values));
+    return Ok(0);
+}
+
+@requires(filesystem(readonly))
+Result(Int, Str) cmd_diag(Opts o) {
+    Cmw c = read_cmw(o.pos[0])?;
+    print(cmwt_diag(c));
+    return Ok(0);
+}
+
+@requires(filesystem(readonly))
+Int cmd_check(List(Str) files, Int i, Int bad) {
+    if (i >= files.len()) { return if (bad > 0) { 1 } else { 0 }; }
+    Result(Cmw, Str) r = read_cmw(files[i]);
+    Int nb = match r {
+        Ok(c) => check_ok(files[i]),
+        Err(e) => check_bad(e),
+    };
+    return cmd_check(files, i + 1, bad + nb);
+}
+
+Int check_ok(Str path) { println(path + ": ok"); return 0; }
+Int check_bad(Str why) { println(why); return 1; }
+
+@requires(filesystem)
+Result(Int, Str) cmd_wrap(Opts o) {
+    Int ind = if (o.ind == "") { 0 - 1 } else { cmwt_ind_parse(o.ind)? };
+    List(Int) value = read_file(o.pos[1])?;
+    Cmw c = cmwt_wrap(o.pos[0], value, ind)?;
+    return Ok(write_out(o.out, cmw_encode(c)));
+}
+
+@requires(filesystem)
+Result(Int, Str) cmd_collect(Opts o) {
+    List(CmwItem) items = collect_items(o.pos, 0, [])?;
+    Cmw c = cmwt_collect(o.ctype, items)?;
+    return Ok(write_out(o.out, cmw_encode(c)));
+}
+
+@requires(filesystem(readonly))
+Result(List(CmwItem), Str) collect_items(List(Str) args, Int i, List(CmwItem) acc) {
+    if (i >= args.len()) { return Ok(acc); }
+    List(Str) lf = cmwt_member_arg(args[i])?;
+    Cmw m = read_cmw(lf[1])?;
+    return collect_items(args, i + 1, acc.concat([cmw_item(lf[0], m)]));
+}
+
+@requires(filesystem)
+Result(Int, Str) cmd_extract(Opts o) {
+    Cmw c = read_cmw(o.pos[0])?;
+    Cmw at = cmwt_at(c, cmwt_path(o.pos[1]))?;
+    Str out = if (o.out == "") { "-" } else { o.out };
+    if (!o.raw) { return Ok(write_out(out, cmw_encode(at))); }
+    return match at {
+        CmwRecord(r) => Ok(write_out(out, r.value)),
+        CmwCollection(k) => Err(cmwt_quote(o.pos[1]) + " is a collection; --value needs a record"),
+    };
+}
+
+@requires(filesystem)
+Result(Int, Str) cmd_set(Opts o) {
+    Cmw c = read_cmw(o.pos[0])?;
+    Cmw m = read_cmw(o.pos[2])?;
+    Cmw n = cmwt_set(c, cmwt_path(o.pos[1]), m)?;
+    return Ok(write_out(o.out, cmw_encode(n)));
+}
+
+@requires(filesystem)
+Result(Int, Str) cmd_remove(Opts o) {
+    Cmw c = read_cmw(o.pos[0])?;
+    Cmw n = cmwt_remove(c, cmwt_path(o.pos[1]))?;
+    return Ok(write_out(o.out, cmw_encode(n)));
+}
+
+// The arguments after the subcommand.
+@requires(args)
+List(Str) rest_args(Int i, List(Str) acc) {
+    if (i >= args.count()) { return acc; }
+    return rest_args(i + 1, acc.concat([args.get(i)]));
+}
+
+@requires(filesystem)
+Int run(Str sub, Opts o) {
+    Int n = o.pos.len();
+    Bool has_out = o.out != "";
+    if (sub == "inspect") { return if (n == 1) { done(cmd_inspect(o)) } else { usage("inspect takes one file") }; }
+    if (sub == "diag") { return if (n == 1) { done(cmd_diag(o)) } else { usage("diag takes one file") }; }
+    if (sub == "check") { return if (n >= 1) { cmd_check(o.pos, 0, 0) } else { usage("check takes at least one file") }; }
+    if (sub == "wrap") { return if (n == 2 && has_out) { done(cmd_wrap(o)) } else { usage("wrap takes a media type, a file and -o") }; }
+    if (sub == "collect") { return if (n >= 1 && has_out) { done(cmd_collect(o)) } else { usage("collect takes LABEL=FILE members and -o") }; }
+    if (sub == "extract") { return if (n == 2) { done(cmd_extract(o)) } else { usage("extract takes a file and a path") }; }
+    if (sub == "set") { return if (n == 3 && has_out) { done(cmd_set(o)) } else { usage("set takes a file, a path, a member file and -o") }; }
+    if (sub == "remove") { return if (n == 2 && has_out) { done(cmd_remove(o)) } else { usage("remove takes a file, a path and -o") }; }
+    return usage("unknown command " + sub);
+}
+
+@requires(args, filesystem)
+Int main() {
+    if (args.count() < 2) { return usage(""); }
+    Str sub = args.get(1);
+    if (sub == "--help" || sub == "-h" || sub == "help") { print(cmwt_usage()); return 0; }
+    if (sub == "--version") { println("resid-cmw " + cmwt_version()); return 0; }
+    Opts o = cmwt_opts(rest_args(2, []));
+    if (o.err != "") { return usage(o.err); }
+    return run(sub, o);
+}

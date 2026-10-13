@@ -1,0 +1,290 @@
+## building
+$ resid-cmw wrap application/eat+cbor hello.bin --ind evidence -o ev.cmw
+[exit 0]
+$ resid-cmw wrap application/octet-stream three.bin -o raw.cmw
+[exit 0]
+$ resid-cmw wrap application/octet-stream empty.bin --ind endorsements,reference-values -o empty.cmw
+[exit 0]
+$ resid-cmw wrap text/plain hello.bin --ind 4294967295 -o allbits.cmw
+[exit 0]
+$ resid-cmw collect --type tag:example.com,2026:demo ev=ev.cmw raw=raw.cmw -o inner.cmw
+[exit 0]
+$ resid-cmw collect outer=inner.cmw z=raw.cmw e=empty.cmw -o tree.cmw
+[exit 0]
+$ resid-cmw collect all=allbits.cmw -o allbits-coll.cmw
+[exit 0]
+## bytes are deterministic
+$ xxd -p ev.cmw
+83746170706c69636174696f6e2f6561742b63626f724568656c6c6f04
+[exit 0]
+$ xxd -p tree.cmw
+a361658378186170706c69636174696f6e2f6f637465742d73747265616d
+4003617a8278186170706c69636174696f6e2f6f637465742d7374726561
+6d43010203656f75746572a362657683746170706c69636174696f6e2f65
+61742b63626f724568656c6c6f04637261778278186170706c6963617469
+6f6e2f6f637465742d73747265616d43010203685f5f636d77635f747819
+7461673a6578616d706c652e636f6d2c323032363a64656d6f
+[exit 0]
+## reading
+$ resid-cmw inspect tree.cmw
+collection 3 members
+  "e": record "application/octet-stream" 0 bytes ind=reference-values|endorsements
+  "z": record "application/octet-stream" 3 bytes
+  "outer": collection type="tag:example.com,2026:demo" 2 members
+    "ev": record "application/eat+cbor" 5 bytes ind=evidence
+    "raw": record "application/octet-stream" 3 bytes
+[exit 0]
+$ resid-cmw inspect tree.cmw --values
+collection 3 members
+  "e": record "application/octet-stream" 0 bytes ind=reference-values|endorsements
+  "z": record "application/octet-stream" 3 bytes 010203
+  "outer": collection type="tag:example.com,2026:demo" 2 members
+    "ev": record "application/eat+cbor" 5 bytes ind=evidence 68656c6c6f
+    "raw": record "application/octet-stream" 3 bytes 010203
+[exit 0]
+$ resid-cmw inspect allbits-coll.cmw
+collection 1 member
+  "all": record "text/plain" 5 bytes ind=reference-values|endorsements|evidence|attestation-results|4294967280
+[exit 0]
+$ resid-cmw diag tree.cmw
+{
+  "e": ["application/octet-stream", h'', 3],
+  "z": ["application/octet-stream", h'010203'],
+  "outer": {
+    "__cmwc_t": "tag:example.com,2026:demo",
+    "ev": ["application/eat+cbor", h'68656c6c6f', 4],
+    "raw": ["application/octet-stream", h'010203']
+  }
+}
+[exit 0]
+$ resid-cmw check ev.cmw tree.cmw
+ev.cmw: ok
+tree.cmw: ok
+[exit 0]
+## extracting
+$ resid-cmw extract tree.cmw outer/ev --value
+hello[exit 0]
+$ resid-cmw extract tree.cmw /outer/ev -o ev2.cmw
+[exit 0]
+$ cmp ev.cmw ev2.cmw
+[exit 0]
+$ resid-cmw extract tree.cmw / -o tree2.cmw
+[exit 0]
+$ cmp tree.cmw tree2.cmw
+[exit 0]
+$ resid-cmw extract tree.cmw outer --value
+resid-cmw: "outer" is a collection; --value needs a record
+[exit 1]
+$ resid-cmw extract tree.cmw z/q
+resid-cmw: "z" is a record, not a collection
+[exit 1]
+$ resid-cmw extract tree.cmw nope
+resid-cmw: no member "nope" in the root
+[exit 1]
+$ resid-cmw extract tree.cmw outer/nope
+resid-cmw: no member "nope" in "outer"
+[exit 1]
+## editing
+$ resid-cmw set tree.cmw outer/added raw.cmw -o set.cmw
+[exit 0]
+$ resid-cmw inspect set.cmw
+collection 3 members
+  "e": record "application/octet-stream" 0 bytes ind=reference-values|endorsements
+  "z": record "application/octet-stream" 3 bytes
+  "outer": collection type="tag:example.com,2026:demo" 3 members
+    "ev": record "application/eat+cbor" 5 bytes ind=evidence
+    "raw": record "application/octet-stream" 3 bytes
+    "added": record "application/octet-stream" 3 bytes
+[exit 0]
+$ resid-cmw set tree.cmw z ev.cmw -o replaced.cmw
+[exit 0]
+$ resid-cmw inspect replaced.cmw
+collection 3 members
+  "e": record "application/octet-stream" 0 bytes ind=reference-values|endorsements
+  "z": record "application/eat+cbor" 5 bytes ind=evidence
+  "outer": collection type="tag:example.com,2026:demo" 2 members
+    "ev": record "application/eat+cbor" 5 bytes ind=evidence
+    "raw": record "application/octet-stream" 3 bytes
+[exit 0]
+$ resid-cmw set tree.cmw missing/x raw.cmw -o x.cmw
+resid-cmw: no member "missing" in the root
+[exit 1]
+$ resid-cmw set tree.cmw / raw.cmw -o x.cmw
+resid-cmw: set needs a path naming a member, not the root
+[exit 1]
+$ resid-cmw set tree.cmw __cmwc_t raw.cmw -o x.cmw
+resid-cmw: the label "__cmwc_t" is not 1 to 255 printable ASCII characters, or is reserved
+[exit 1]
+$ resid-cmw remove tree.cmw outer/raw -o removed.cmw
+[exit 0]
+$ resid-cmw inspect removed.cmw
+collection 3 members
+  "e": record "application/octet-stream" 0 bytes ind=reference-values|endorsements
+  "z": record "application/octet-stream" 3 bytes
+  "outer": collection type="tag:example.com,2026:demo" 1 member
+    "ev": record "application/eat+cbor" 5 bytes ind=evidence
+[exit 0]
+$ resid-cmw remove removed.cmw outer/ev -o x.cmw
+resid-cmw: removing "ev" would leave "outer" with no members
+[exit 1]
+$ resid-cmw remove tree.cmw outer/zzz -o x.cmw
+resid-cmw: no member "zzz" in "outer"
+[exit 1]
+$ ls x.cmw
+ls: cannot access 'x.cmw': No such file or directory
+[exit 2]
+## refused builds
+$ resid-cmw wrap  hello.bin -o x.cmw
+resid-cmw: the media type "" is not 1 to 255 printable ASCII characters
+[exit 1]
+$ resid-cmw wrap a	b hello.bin -o x.cmw
+resid-cmw: the media type "a\tb" is not 1 to 255 printable ASCII characters
+[exit 1]
+$ resid-cmw wrap t hello.bin --ind bogus -o x.cmw
+resid-cmw: unknown indicator `bogus` (expected a number or reference-values, endorsements, evidence, attestation-results)
+[exit 1]
+$ resid-cmw wrap t hello.bin --ind 4294967296 -o x.cmw
+resid-cmw: the indicator 4294967296 is not an unsigned 32-bit value
+[exit 1]
+$ resid-cmw wrap t nonexistent -o x.cmw
+resid-cmw: nonexistent: no such file
+[exit 1]
+$ resid-cmw collect a=raw.cmw a=ev.cmw -o x.cmw
+resid-cmw: the label "a" is given twice
+[exit 1]
+$ resid-cmw collect __cmwc_t=raw.cmw -o x.cmw
+resid-cmw: the label "__cmwc_t" is not 1 to 255 printable ASCII characters, or is reserved
+[exit 1]
+$ resid-cmw collect noequals -o x.cmw
+resid-cmw: expected LABEL=FILE, got "noequals"
+[exit 1]
+$ resid-cmw collect =raw.cmw -o x.cmw
+resid-cmw: expected LABEL=FILE, got "=raw.cmw"
+[exit 1]
+$ resid-cmw collect a=hello.bin -o x.cmw
+resid-cmw: hello.bin: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+[exit 1]
+$ resid-cmw collect --type  a=raw.cmw -o x.cmw
+[exit 0]
+$ ls x.cmw
+x.cmw
+[exit 0]
+## nesting limit
+$ resid-cmw check d11.cmw
+d11.cmw: ok
+[exit 0]
+$ resid-cmw collect l12=d11.cmw -o d12.cmw
+resid-cmw: a CMW would nest more than 11 levels deep
+[exit 1]
+$ resid-cmw set d11.cmw l11/x d2.cmw -o d12.cmw
+[exit 0]
+$ resid-cmw set d11.cmw l11/x raw.cmw -o d11b.cmw
+[exit 0]
+$ resid-cmw check d11b.cmw
+d11b.cmw: ok
+[exit 0]
+$ resid-cmw check d12.cmw
+d12.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+[exit 1]
+## refused inputs
+$ resid-cmw check intlabel.cmw
+intlabel.cmw: a CMW collection label is not text (an integer label is not read here)
+[exit 1]
+$ resid-cmw check fourelem.cmw
+fourelem.cmw: a CMW record has 2 or 3 elements, got 4
+[exit 1]
+$ resid-cmw check bigind.cmw
+bigind.cmw: a CMW record's indicator is not an unsigned 32-bit value
+[exit 1]
+$ resid-cmw check textvalue.cmw
+textvalue.cmw: a CMW record's value is not a byte string
+[exit 1]
+$ resid-cmw check intmedia.cmw
+intmedia.cmw: a CMW record's type is not text (a content-format number is not read here)
+[exit 1]
+$ resid-cmw check indef.cmw
+indef.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+[exit 1]
+$ resid-cmw check trailing.cmw
+trailing.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+[exit 1]
+$ resid-cmw check emptymap.cmw
+emptymap.cmw: a CMW collection has no members
+[exit 1]
+$ resid-cmw check duplabel.cmw
+duplabel.cmw: the CMW collection label `x` appears twice
+[exit 1]
+$ resid-cmw check badtype.cmw
+badtype.cmw: a CMW collection's type is not text
+[exit 1]
+$ resid-cmw check scalar.cmw
+scalar.cmw: a CMW is an array (a record) or a map (a collection), got an unsigned integer
+[exit 1]
+$ resid-cmw check truncated.cmw
+truncated.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+[exit 1]
+$ resid-cmw check ctrlmedia.cmw
+ctrlmedia.cmw: a CMW record's media type is not 1 to 255 printable ASCII characters
+[exit 1]
+$ resid-cmw check onlytype.cmw
+onlytype.cmw: a CMW collection has no members
+[exit 1]
+$ resid-cmw check zero.cmw
+zero.cmw: no CMW: empty input
+[exit 1]
+$ resid-cmw check raw.cmw scalar.cmw ev.cmw
+raw.cmw: ok
+scalar.cmw: a CMW is an array (a record) or a map (a collection), got an unsigned integer
+ev.cmw: ok
+[exit 1]
+$ resid-cmw inspect nonexistent
+resid-cmw: nonexistent: no such file
+[exit 1]
+$ resid-cmw inspect adir
+resid-cmw: adir: is a directory
+[exit 1]
+$ resid-cmw inspect -
+resid-cmw: reading stdin is not supported; give a file
+[exit 1]
+## usage
+$ resid-cmw
+usage: resid-cmw <command> [args]
+
+  inspect <cmw> [--values]                 tree of records and collections
+  diag <cmw>                               CBOR diagnostic notation
+  check <cmw>...                           validate; exit 1 if any is not a CMW
+  wrap <media-type> <file> [--ind I] -o <out>
+                                           a record carrying the file's bytes
+  collect [--type T] <label>=<cmw>... -o <out>
+                                           a collection of existing CMWs
+  extract <cmw> <path> [--value] [-o <out>]
+                                           the CMW at path (--value: a record's bytes)
+  set <cmw> <path> <member-cmw> -o <out>   add or replace the member at path
+  remove <cmw> <path> -o <out>             remove the member at path
+
+A path is labels joined by "/" ("" or "/" is the root). <out> may be "-"
+for stdout. An indicator is a number or names joined by ",":
+  reference-values, endorsements, evidence, attestation-results
+
+[exit 2]
+$ resid-cmw --version
+resid-cmw 0.1.0
+[exit 0]
+$ resid-cmw frobnicate
+resid-cmw: unknown command frobnicate (resid-cmw --help for usage)
+[exit 2]
+$ resid-cmw inspect
+resid-cmw: inspect takes one file (resid-cmw --help for usage)
+[exit 2]
+$ resid-cmw inspect raw.cmw --bogus
+resid-cmw: unknown option --bogus (resid-cmw --help for usage)
+[exit 2]
+$ resid-cmw wrap t hello.bin
+resid-cmw: wrap takes a media type, a file and -o (resid-cmw --help for usage)
+[exit 2]
+$ resid-cmw wrap t hello.bin -o
+resid-cmw: -o needs a value (resid-cmw --help for usage)
+[exit 2]
+$ resid-cmw extract raw.cmw -- --value
+resid-cmw: the root is a record, not a collection
+[exit 1]

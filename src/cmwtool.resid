@@ -1,0 +1,376 @@
+// cmwtool.resid — the pure half of resid-cmw: rendering CMWs as a tree or
+// in CBOR diagnostic notation, walking and editing them by label path, and
+// parsing the command line. Nothing here touches the filesystem; the
+// effects live in resid-cmw.resid. The CMW model and its strict CBOR codec
+// are the standard library's lib/cmw.resid.
+
+import "cmw.resid";
+import "crypto.resid";
+
+/// The tool's version, printed by `resid-cmw --version`.
+pub Str cmwt_version() { return "0.1.0"; }
+
+/// How many value bytes `inspect --values` shows before eliding the rest.
+pub Int cmwt_preview_bytes() { return 32; }
+
+// ─── Indicators ─────────────────────────────────────────────────────
+
+/// The indicator bit names of draft-ietf-rats-msg-wrap, lowest bit first.
+pub List(Str) cmwt_ind_names() { return ["reference-values", "endorsements", "evidence", "attestation-results"]; }
+
+/// The indicator `ind` as names joined by "|", or "" when it is -1.
+/// Bits without a name are shown as one decimal remainder.
+pub Str cmwt_ind_text(Int ind) {
+    if (ind < 0) { return ""; }
+    List(Str) names = cmwt_ind_bits(ind, 0, []);
+    Int high = (ind / 16) * 16;
+    List(Str) all = if (high > 0) { names.concat([f"{high}"]) } else { names };
+    if (all.len() == 0) { return "none"; }
+    return str_join(all, "|");
+}
+
+List(Str) cmwt_ind_bits(Int ind, Int i, List(Str) acc) {
+    if (i >= 4) { return acc; }
+    Int bit = cmwt_pow2(i);
+    List(Str) next = if ((ind / bit) % 2 == 1) { acc.concat([cmwt_ind_names()[i]]) } else { acc };
+    return cmwt_ind_bits(ind, i + 1, next);
+}
+
+Int cmwt_pow2(Int i) { return if (i == 0) { 1 } else { 2 * cmwt_pow2(i - 1) }; }
+
+/// The indicator named by `s`: a decimal number, or bit names joined by
+/// "," or "|". Err names what was not understood.
+pub Result(Int, Str) cmwt_ind_parse(Str s) {
+    if (str_is_int(s)) {
+        Int n = str_parse_int(s);
+        if (n < 0 || n > 4294967295) { return Err(f"the indicator {n} is not an unsigned 32-bit value"); }
+        return Ok(n);
+    }
+    List(Str) parts = str_split(str_replace(s, "|", ","), ",");
+    return cmwt_ind_names_sum(parts, 0, 0);
+}
+
+Result(Int, Str) cmwt_ind_names_sum(List(Str) parts, Int i, Int acc) {
+    if (i >= parts.len()) { return Ok(acc); }
+    Int bit = cmwt_ind_index(str_trim(parts[i]), 0);
+    if (bit < 0) { return Err("unknown indicator `" + parts[i] + "` (expected a number or " + str_join(cmwt_ind_names(), ", ") + ")"); }
+    Int v = cmwt_pow2(bit);
+    Int next = if ((acc / v) % 2 == 1) { acc } else { acc + v };
+    return cmwt_ind_names_sum(parts, i + 1, next);
+}
+
+Int cmwt_ind_index(Str name, Int i) {
+    if (i >= cmwt_ind_names().len()) { return 0 - 1; }
+    if (cmwt_ind_names()[i] == name) { return i; }
+    return cmwt_ind_index(name, i + 1);
+}
+
+// ─── Rendering ──────────────────────────────────────────────────────
+
+/// `s` as a double-quoted string, with `\`, `"`, newline, return and tab escaped.
+pub Str cmwt_quote(Str s) {
+    Str a = str_replace(str_replace(s, "\\", "\\\\"), "\"", "\\\"");
+    return "\"" + str_replace(str_replace(str_replace(a, "\n", "\\n"), "\r", "\\r"), "\t", "\\t") + "\"";
+}
+
+/// An indented tree of `c`, one line per record or collection.
+/// With `values`, each record line ends with the first bytes of its value
+/// in hex.
+pub Str cmwt_tree(Cmw c, Bool values) { return cmwt_tree_node(c, "", "", values); }
+
+Str cmwt_tree_node(Cmw c, Str indent, Str label, Bool values) {
+    return match c {
+        CmwRecord(r) => indent + label + cmwt_rec_line(r, values) + "\n",
+        CmwCollection(k) => indent + label + cmwt_coll_line(k) + "\n" + cmwt_tree_members(k.items, 0, indent + "  ", values),
+    };
+}
+
+Str cmwt_tree_members(List(CmwItem) xs, Int i, Str indent, Bool values) {
+    if (i >= xs.len()) { return ""; }
+    return cmwt_tree_node(xs[i].cmw, indent, cmwt_quote(xs[i].label) + ": ", values) + cmwt_tree_members(xs, i + 1, indent, values);
+}
+
+Str cmwt_rec_line(CmwRec r, Bool values) {
+    Str ind = if (r.ind < 0) { "" } else { " ind=" + cmwt_ind_text(r.ind) };
+    Str n = if (r.value.len() == 1) { "1 byte" } else { f"{r.value.len()} bytes" };
+    Str head = "record " + cmwt_quote(r.media_type) + " " + n + ind;
+    if (!values || r.value.len() == 0) { return head; }
+    Int k = if (r.value.len() < cmwt_preview_bytes()) { r.value.len() } else { cmwt_preview_bytes() };
+    Str more = if (r.value.len() > k) { "..." } else { "" };
+    return head + " " + cmwt_hex(r.value, 0, k, StrBuf()) + more;
+}
+
+Str cmwt_coll_line(CmwColl k) {
+    Str t = if (k.ctype == "") { "" } else { " type=" + cmwt_quote(k.ctype) };
+    Str n = if (k.items.len() == 1) { "1 member" } else { f"{k.items.len()} members" };
+    return "collection" + t + " " + n;
+}
+
+// Bytes [i, e) of `b` as lowercase hex.
+Str cmwt_hex(List(Int) b, Int i, Int e, StrBuf acc) {
+    if (i >= e) { return acc.finish(); }
+    return cmwt_hex(b, i + 1, e, acc.push(hex_byte(b[i])));
+}
+
+/// `c` in CBOR extended diagnostic notation (RFC 8610 Appendix G), with
+/// a collection's entries one per line in the order they were read.
+pub Str cmwt_diag(Cmw c) { return cmwt_diag_at(c, "") + "\n"; }
+
+Str cmwt_diag_at(Cmw c, Str indent) {
+    return match c {
+        CmwRecord(r) => cmwt_diag_rec(r),
+        CmwCollection(k) => "{\n" + cmwt_diag_entries(k, indent + "  ") + indent + "}",
+    };
+}
+
+Str cmwt_diag_rec(CmwRec r) {
+    Str ind = if (r.ind < 0) { "" } else { f", {r.ind}" };
+    return "[" + cmwt_quote(r.media_type) + ", h'" + cmwt_hex(r.value, 0, r.value.len(), StrBuf()) + "'" + ind + "]";
+}
+
+Str cmwt_diag_entries(CmwColl k, Str indent) {
+    List(Str) head = if (k.ctype == "") { [] } else { [indent + cmwt_quote("__cmwc_t") + ": " + cmwt_quote(k.ctype)] };
+    List(Str) lines = head.concat(cmwt_diag_members(k.items, 0, indent, []));
+    return str_join(lines, ",\n") + "\n";
+}
+
+List(Str) cmwt_diag_members(List(CmwItem) xs, Int i, Str indent, List(Str) acc) {
+    if (i >= xs.len()) { return acc; }
+    Str line = indent + cmwt_quote(xs[i].label) + ": " + cmwt_diag_at(xs[i].cmw, indent);
+    return cmwt_diag_members(xs, i + 1, indent, acc.concat([line]));
+}
+
+// ─── Paths ──────────────────────────────────────────────────────────
+
+/// The labels of path `p`, separated by "/"; "" and "/" name the root.
+/// A label that itself contains "/" cannot be named by a path.
+pub List(Str) cmwt_path(Str p) {
+    List(Str) none = [];
+    if (p == "" || p == "/") { return none; }
+    Str q = if (str_starts_with(p, "/")) { str_slice(p, 1, str_len(p)) } else { p };
+    return str_split(q, "/");
+}
+
+/// The CMW at `path` inside `c`.
+pub Result(Cmw, Str) cmwt_at(Cmw c, List(Str) path) { return cmwt_at_i(c, path, 0); }
+
+Result(Cmw, Str) cmwt_at_i(Cmw c, List(Str) path, Int i) {
+    if (i >= path.len()) { return Ok(c); }
+    CmwColl k = cmwt_coll_of(c, path, i)?;
+    Option(Cmw) m = cmw_get(k, path[i]);
+    return match m {
+        Some(x) => cmwt_at_i(x, path, i + 1),
+        None => Err("no member " + cmwt_quote(path[i]) + " in " + cmwt_where(path, i)),
+    };
+}
+
+Result(CmwColl, Str) cmwt_coll_of(Cmw c, List(Str) path, Int i) {
+    return match c {
+        CmwCollection(k) => Ok(k),
+        CmwRecord(r) => Err(cmwt_where(path, i) + " is a record, not a collection"),
+    };
+}
+
+// The text naming the node reached by the first `i` labels of `path`.
+Str cmwt_where(List(Str) path, Int i) {
+    if (i == 0) { return "the root"; }
+    return cmwt_quote(str_join(path[0..i], "/"));
+}
+
+/// `c` with `v` placed at `path`: added as the last member of its
+/// collection, or replacing the member already there. Every collection on
+/// the way must exist.
+pub Result(Cmw, Str) cmwt_set(Cmw c, List(Str) path, Cmw v) {
+    if (path.len() == 0) { return Err("set needs a path naming a member, not the root"); }
+    Cmw out = cmwt_set_i(c, path, 0, v)?;
+    cmwt_fits(out)?;
+    return Ok(out);
+}
+
+Result(Cmw, Str) cmwt_set_i(Cmw c, List(Str) path, Int i, Cmw v) {
+    CmwColl k = cmwt_coll_of(c, path, i)?;
+    Str l = path[i];
+    if (i + 1 == path.len()) {
+        if (!cmwt_label_ok(l)) { return Err("the label " + cmwt_quote(l) + " is not 1 to 255 printable ASCII characters, or is reserved"); }
+        return Ok(cmw_collection(k.ctype, cmwt_put(k.items, l, v, 0, false, [])));
+    }
+    Option(Cmw) m = cmw_get(k, l);
+    Cmw inner = match m { Some(x) => x, None => cmwt_missing() };
+    if (!cmwt_has(k, l)) { return Err("no member " + cmwt_quote(l) + " in " + cmwt_where(path, i)); }
+    Cmw sub = cmwt_set_i(inner, path, i + 1, v)?;
+    return Ok(cmw_collection(k.ctype, cmwt_put(k.items, l, sub, 0, false, [])));
+}
+
+// A placeholder for a member found missing; never used past the check.
+Cmw cmwt_missing() { List(Int) none = []; return cmw_record("x", none); }
+
+Bool cmwt_has(CmwColl k, Str l) { return match cmw_get(k, l) { Some(x) => true, None => false }; }
+
+List(CmwItem) cmwt_put(List(CmwItem) xs, Str l, Cmw v, Int i, Bool done, List(CmwItem) acc) {
+    if (i >= xs.len()) { return if (done) { acc } else { acc.concat([cmw_item(l, v)]) }; }
+    if (xs[i].label == l) { return cmwt_put(xs, l, v, i + 1, true, acc.concat([cmw_item(l, v)])); }
+    return cmwt_put(xs, l, v, i + 1, done, acc.concat([xs[i]]));
+}
+
+/// `c` without the member at `path`. A collection left with no members
+/// is refused: a CMW collection has at least one.
+pub Result(Cmw, Str) cmwt_remove(Cmw c, List(Str) path) {
+    if (path.len() == 0) { return Err("remove needs a path naming a member, not the root"); }
+    return cmwt_remove_i(c, path, 0);
+}
+
+Result(Cmw, Str) cmwt_remove_i(Cmw c, List(Str) path, Int i) {
+    CmwColl k = cmwt_coll_of(c, path, i)?;
+    Str l = path[i];
+    if (!cmwt_has(k, l)) { return Err("no member " + cmwt_quote(l) + " in " + cmwt_where(path, i)); }
+    if (i + 1 == path.len()) {
+        if (k.items.len() == 1) { return Err("removing " + cmwt_quote(l) + " would leave " + cmwt_where(path, i) + " with no members"); }
+        return Ok(cmw_collection(k.ctype, cmwt_drop(k.items, l, 0, [])));
+    }
+    Option(Cmw) m = cmw_get(k, l);
+    Cmw inner = match m { Some(x) => x, None => cmwt_missing() };
+    Cmw sub = cmwt_remove_i(inner, path, i + 1)?;
+    return Ok(cmw_collection(k.ctype, cmwt_put(k.items, l, sub, 0, false, [])));
+}
+
+List(CmwItem) cmwt_drop(List(CmwItem) xs, Str l, Int i, List(CmwItem) acc) {
+    if (i >= xs.len()) { return acc; }
+    List(CmwItem) next = if (xs[i].label == l) { acc } else { acc.concat([xs[i]]) };
+    return cmwt_drop(xs, l, i + 1, next);
+}
+
+// ─── Building ───────────────────────────────────────────────────────
+
+/// Whether `l` may label a collection member.
+pub Bool cmwt_label_ok(Str l) { return cmw_media_ok(l) && l != "__cmwc_t"; }
+
+/// A record of `media_type` carrying `value` with indicator `ind` (-1 for
+/// none), or why it cannot be one.
+pub Result(Cmw, Str) cmwt_wrap(Str media_type, List(Int) value, Int ind) {
+    if (!cmw_media_ok(media_type)) { return Err("the media type " + cmwt_quote(media_type) + " is not 1 to 255 printable ASCII characters"); }
+    if (ind < 0 - 1 || ind > 4294967295) { return Err(f"the indicator {ind} is not an unsigned 32-bit value"); }
+    return Ok(CmwRecord(CmwRec {.media_type = media_type, .value = value, .ind = ind}));
+}
+
+/// A collection of type `ctype` ("" for none) with members `items`, or
+/// why it cannot be one.
+pub Result(Cmw, Str) cmwt_collect(Str ctype, List(CmwItem) items) {
+    if (ctype != "" && !cmw_media_ok(ctype)) { return Err("the collection type " + cmwt_quote(ctype) + " is not 1 to 255 printable ASCII characters"); }
+    if (items.len() == 0) { return Err("a collection needs at least one member"); }
+    cmwt_labels_ok(items, 0, [])?;
+    Cmw c = cmw_collection(ctype, items);
+    cmwt_fits(c)?;
+    return Ok(c);
+}
+
+Result(Bool, Str) cmwt_labels_ok(List(CmwItem) xs, Int i, List(Str) seen) {
+    if (i >= xs.len()) { return Ok(true); }
+    Str l = xs[i].label;
+    if (!cmwt_label_ok(l)) { return Err("the label " + cmwt_quote(l) + " is not 1 to 255 printable ASCII characters, or is reserved"); }
+    if (cmwt_seen(seen, l, 0)) { return Err("the label " + cmwt_quote(l) + " is given twice"); }
+    return cmwt_labels_ok(xs, i + 1, seen.concat([l]));
+}
+
+Bool cmwt_seen(List(Str) xs, Str x, Int i) { return i < xs.len() && (xs[i] == x || cmwt_seen(xs, x, i + 1)); }
+
+/// The deepest CMW this tool writes: one less than cmw_max_depth(), since
+/// cmw_decode's well-formedness check counts a record's elements as a level.
+pub Int cmwt_max_depth() { return cmw_max_depth() - 1; }
+
+/// Ok when `c` is within the limits on nesting and members, so cmw_encode
+/// accepts it and cmw_decode reads it back.
+pub Result(Bool, Str) cmwt_fits(Cmw c) {
+    if (cmwt_depth(c) > cmwt_max_depth()) { return Err(f"a CMW would nest more than {cmwt_max_depth()} levels deep"); }
+    if (cmwt_widest(c) > cmw_max_items()) { return Err(f"a collection would have more than {cmw_max_items()} members"); }
+    return Ok(true);
+}
+
+/// The nesting depth of `c`: 1 for a record, one more than its deepest
+/// member for a collection.
+pub Int cmwt_depth(Cmw c) {
+    return match c {
+        CmwRecord(r) => 1,
+        CmwCollection(k) => 1 + cmwt_depth_max(k.items, 0, 0),
+    };
+}
+
+Int cmwt_depth_max(List(CmwItem) xs, Int i, Int best) {
+    if (i >= xs.len()) { return best; }
+    Int d = cmwt_depth(xs[i].cmw);
+    return cmwt_depth_max(xs, i + 1, if (d > best) { d } else { best });
+}
+
+Int cmwt_widest(Cmw c) {
+    return match c {
+        CmwRecord(r) => 0,
+        CmwCollection(k) => cmwt_widest_max(k.items, 0, k.items.len()),
+    };
+}
+
+Int cmwt_widest_max(List(CmwItem) xs, Int i, Int best) {
+    if (i >= xs.len()) { return best; }
+    Int w = cmwt_widest(xs[i].cmw);
+    return cmwt_widest_max(xs, i + 1, if (w > best) { w } else { best });
+}
+
+// ─── Command line ───────────────────────────────────────────────────
+
+/// A parsed command line: positional arguments and options.
+/// `err` is "" unless the line could not be parsed.
+pub type Opts = { List(Str) pos; Str out; Bool values; Bool raw; Str ctype; Str ind; Str err; };
+
+/// The options in `argv` (the words after the subcommand).
+/// Options: `-o FILE`, `--values`, `--value`, `--type T`, `--ind I`;
+/// `--` ends them.
+pub Opts cmwt_opts(List(Str) argv) {
+    List(Str) none = [];
+    return cmwt_opts_at(argv, 0, Opts {.pos = none, .out = "", .values = false, .raw = false, .ctype = "", .ind = "", .err = ""}, false);
+}
+
+Opts cmwt_opts_at(List(Str) a, Int i, Opts o, Bool rest) {
+    if (i >= a.len() || o.err != "") { return o; }
+    Str w = a[i];
+    if (rest || w == "-" || !str_starts_with(w, "-")) { return cmwt_opts_at(a, i + 1, cmwt_o(o, o.pos.concat([w]), o.out, o.values, o.raw, o.ctype, o.ind, ""), rest); }
+    if (w == "--") { return cmwt_opts_at(a, i + 1, o, true); }
+    if (w == "--values") { return cmwt_opts_at(a, i + 1, cmwt_o(o, o.pos, o.out, true, o.raw, o.ctype, o.ind, ""), rest); }
+    if (w == "--value") { return cmwt_opts_at(a, i + 1, cmwt_o(o, o.pos, o.out, o.values, true, o.ctype, o.ind, ""), rest); }
+    if (w == "-o" || w == "--type" || w == "--ind") {
+        if (i + 1 >= a.len()) { return cmwt_o(o, o.pos, o.out, o.values, o.raw, o.ctype, o.ind, w + " needs a value"); }
+        Str v = a[i + 1];
+        Opts n = if (w == "-o") { cmwt_o(o, o.pos, v, o.values, o.raw, o.ctype, o.ind, "") } else { if (w == "--type") { cmwt_o(o, o.pos, o.out, o.values, o.raw, v, o.ind, "") } else { cmwt_o(o, o.pos, o.out, o.values, o.raw, o.ctype, v, "") } };
+        return cmwt_opts_at(a, i + 2, n, rest);
+    }
+    return cmwt_o(o, o.pos, o.out, o.values, o.raw, o.ctype, o.ind, "unknown option " + w);
+}
+
+Opts cmwt_o(Opts o, List(Str) pos, Str out, Bool values, Bool raw, Str ctype, Str ind, Str err) {
+    return Opts {.pos = pos, .out = out, .values = values, .raw = raw, .ctype = ctype, .ind = ind, .err = err};
+}
+
+/// A `label=file` argument split at its first "=", or why it is not one.
+pub Result(List(Str), Str) cmwt_member_arg(Str s) {
+    Int at = str_index_of(s, "=", 0);
+    if (at <= 0) { return Err("expected LABEL=FILE, got " + cmwt_quote(s)); }
+    return Ok([str_slice(s, 0, at), str_slice(s, at + 1, str_len(s))]);
+}
+
+/// The usage text.
+pub Str cmwt_usage() {
+    return "usage: resid-cmw <command> [args]\n"
+        + "\n"
+        + "  inspect <cmw> [--values]                 tree of records and collections\n"
+        + "  diag <cmw>                               CBOR diagnostic notation\n"
+        + "  check <cmw>...                           validate; exit 1 if any is not a CMW\n"
+        + "  wrap <media-type> <file> [--ind I] -o <out>\n"
+        + "                                           a record carrying the file's bytes\n"
+        + "  collect [--type T] <label>=<cmw>... -o <out>\n"
+        + "                                           a collection of existing CMWs\n"
+        + "  extract <cmw> <path> [--value] [-o <out>]\n"
+        + "                                           the CMW at path (--value: a record's bytes)\n"
+        + "  set <cmw> <path> <member-cmw> -o <out>   add or replace the member at path\n"
+        + "  remove <cmw> <path> -o <out>             remove the member at path\n"
+        + "\n"
+        + "A path is labels joined by \"/\" (\"\" or \"/\" is the root). <out> may be \"-\"\n"
+        + "for stdout. An indicator is a number or names joined by \",\":\n"
+        + "  reference-values, endorsements, evidence, attestation-results\n";
+}
