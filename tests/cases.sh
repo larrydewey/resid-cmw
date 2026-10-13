@@ -76,16 +76,16 @@ t ls "$W/x.cmw"
 
 echo "## nesting limit"
 cp "$W/raw.cmw" "$W/d1.cmw"
-for i in 2 3 4 5 6 7 8 9 10 11; do
+for i in 2 3 4 5 6 7 8 9 10 11 12; do
     $CMW collect "l$i=$W/d$((i - 1)).cmw" -o "$W/d$i.cmw"
 done
-t $CMW check "$W/d11.cmw"
-t $CMW collect "l12=$W/d11.cmw" -o "$W/d12.cmw"
-t $CMW set "$W/d11.cmw" l11/x "$W/d2.cmw" -o "$W/d12.cmw"
-t $CMW set "$W/d11.cmw" l11/x "$W/raw.cmw" -o "$W/d11b.cmw"
-t $CMW check "$W/d11b.cmw"
-hex d12.cmw a1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616c8261614100
 t $CMW check "$W/d12.cmw"
+t $CMW collect "l13=$W/d12.cmw" -o "$W/d13.cmw"
+t $CMW set "$W/d12.cmw" l12/x "$W/d2.cmw" -o "$W/d13.cmw"
+t $CMW set "$W/d12.cmw" l12/x "$W/raw.cmw" -o "$W/d12b.cmw"
+t $CMW check "$W/d12b.cmw"
+hex d13.cmw a1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616ca1616c8261614100
+t $CMW check "$W/d13.cmw"
 
 echo "## refused inputs"
 hex intlabel.cmw   a1018261614100

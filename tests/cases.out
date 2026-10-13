@@ -170,21 +170,21 @@ $ ls x.cmw
 x.cmw
 [exit 0]
 ## nesting limit
-$ resid-cmw check d11.cmw
-d11.cmw: ok
-[exit 0]
-$ resid-cmw collect l12=d11.cmw -o d12.cmw
-resid-cmw: a CMW would nest more than 11 levels deep
-[exit 1]
-$ resid-cmw set d11.cmw l11/x d2.cmw -o d12.cmw
-[exit 0]
-$ resid-cmw set d11.cmw l11/x raw.cmw -o d11b.cmw
-[exit 0]
-$ resid-cmw check d11b.cmw
-d11b.cmw: ok
-[exit 0]
 $ resid-cmw check d12.cmw
-d12.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
+d12.cmw: ok
+[exit 0]
+$ resid-cmw collect l13=d12.cmw -o d13.cmw
+resid-cmw: a CMW would nest more than 12 levels deep
+[exit 1]
+$ resid-cmw set d12.cmw l12/x d2.cmw -o d13.cmw
+[exit 0]
+$ resid-cmw set d12.cmw l12/x raw.cmw -o d12b.cmw
+[exit 0]
+$ resid-cmw check d12b.cmw
+d12b.cmw: ok
+[exit 0]
+$ resid-cmw check d13.cmw
+d13.cmw: not one well-formed CBOR item of definite lengths, nested at most 12 deep
 [exit 1]
 ## refused inputs
 $ resid-cmw check intlabel.cmw

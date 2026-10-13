@@ -273,14 +273,10 @@ Result(Bool, Str) cmwt_labels_ok(List(CmwItem) xs, Int i, List(Str) seen) {
 
 Bool cmwt_seen(List(Str) xs, Str x, Int i) { return i < xs.len() && (xs[i] == x || cmwt_seen(xs, x, i + 1)); }
 
-/// The deepest CMW this tool writes: one less than cmw_max_depth(), since
-/// cmw_decode's well-formedness check counts a record's elements as a level.
-pub Int cmwt_max_depth() { return cmw_max_depth() - 1; }
-
 /// Ok when `c` is within the limits on nesting and members, so cmw_encode
 /// accepts it and cmw_decode reads it back.
 pub Result(Bool, Str) cmwt_fits(Cmw c) {
-    if (cmwt_depth(c) > cmwt_max_depth()) { return Err(f"a CMW would nest more than {cmwt_max_depth()} levels deep"); }
+    if (cmwt_depth(c) > cmw_max_depth()) { return Err(f"a CMW would nest more than {cmw_max_depth()} levels deep"); }
     if (cmwt_widest(c) > cmw_max_items()) { return Err(f"a collection would have more than {cmw_max_items()} members"); }
     return Ok(true);
 }

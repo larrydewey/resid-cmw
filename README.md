@@ -91,8 +91,6 @@ from outside:
 Every refusal names what was wrong. Output is deterministic: a
 collection's entries are written in the RFC 8949 §4.2.1 order, whatever
 order they were given in, so the same CMW always encodes to the same bytes.
-The tool writes at most 11 levels of nesting, so everything it writes can
-be read back.
 
 ## Spec changes
 
